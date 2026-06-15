@@ -1,396 +1,347 @@
-import pygame, sys
-from ultils import scale_image
+from __future__ import annotations
+
+import argparse
 import math
-import neat
 import os
 import random
-import pandas as pd
-import matplotlib.pyplot as plt
-from matplotlib.ticker import MaxNLocator
-import numpy as np
+from pathlib import Path
+
+import neat
+import pygame
 
 
-
-# pygame setting
 SCREEN_WIDTH = 1280
 SCREEN_HEIGHT = 720
+BASE_DIR = Path(__file__).resolve().parent
+ASSET_DIR = BASE_DIR / "assets"
 
-screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-clock = pygame.time.Clock()
-pygame.init()
+ROAD_COLOR = pygame.Color(255, 255, 255, 255)
+ROAD_THRESHOLD = (20, 20, 20, 255)
+RADAR_RANGE = 250
 
-# Goals rects
-goal1_rect = pygame.Rect(1170, 400, 80, 80)
-goal2_rect = pygame.Rect(1174, 200, 80, 80)
-goal3_rect = pygame.Rect(1000, 85, 80, 80)
-goal4_rect = pygame.Rect(750, 120, 80, 80)
-goal5_rect = pygame.Rect(520, 215, 80, 80)
-goal6_rect = pygame.Rect(280, 120, 80, 80)
-goal7_rect = pygame.Rect(60, 200, 80, 80)
-goal8_rect = pygame.Rect(18, 400, 80, 80)
-goal9_rect = pygame.Rect(125, 560, 80, 80)
-goal10_rect = pygame.Rect(380, 425, 80, 80)
-goal11_rect = pygame.Rect(750, 530, 80, 80)
+screen: pygame.Surface
+clock: pygame.time.Clock
+track: pygame.Surface
+road_mask: pygame.mask.Mask
+car_image: pygame.Surface
 
-goals_rects = [goal1_rect, goal2_rect, goal3_rect, goal4_rect, goal5_rect, goal6_rect, goal7_rect, goal8_rect,
-               goal9_rect, goal10_rect, goal11_rect]
+cars: list[pygame.sprite.GroupSingle]
+ge: list[neat.DefaultGenome]
+nets: list[neat.nn.FeedForwardNetwork]
+pop: neat.Population
+
+frame_limit = 800
+draw_radars = True
+history: list[dict[str, float]] = []
 
 
-# Classes
+GOALS = [
+    pygame.Rect(1170, 400, 80, 80),
+    pygame.Rect(1174, 200, 80, 80),
+    pygame.Rect(1000, 85, 80, 80),
+    pygame.Rect(750, 120, 80, 80),
+    pygame.Rect(520, 215, 80, 80),
+    pygame.Rect(280, 120, 80, 80),
+    pygame.Rect(60, 200, 80, 80),
+    pygame.Rect(18, 400, 80, 80),
+    pygame.Rect(125, 560, 80, 80),
+    pygame.Rect(380, 425, 80, 80),
+    pygame.Rect(750, 530, 80, 80),
+]
+
+
+def scale_image(image: pygame.Surface, factor: float) -> pygame.Surface:
+    width = int(image.get_width() * factor)
+    height = int(image.get_height() * factor)
+    return pygame.transform.scale(image, (width, height))
+
+
+def load_image(name: str) -> pygame.Surface:
+    path = ASSET_DIR / name
+    if not path.exists():
+        raise FileNotFoundError(f"Missing asset: {path}")
+    return pygame.image.load(str(path)).convert_alpha()
+
+
+def is_on_road(point: tuple[int, int]) -> bool:
+    x, y = point
+    if not (0 <= x < SCREEN_WIDTH and 0 <= y < SCREEN_HEIGHT):
+        return False
+    return road_mask.get_at((x, y)) == 1
+
+
 class Car(pygame.sprite.Sprite):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
-        self.image = scale_image(pygame.image.load('assets/Car_3_01.png'), 0.04)
-        self.alpha_image = scale_image(pygame.image.load('assets/Car_3_01.png'), 0.04)
+        self.alpha_image = car_image.copy()
+        self.image = self.alpha_image.copy()
         self.rect = self.image.get_rect()
 
-        self.speed = 0
-        self.max_speed = 24  # test with 12
+        self.speed = 0.0
+        self.max_speed = 24
         self.acceleration = 2
-
         self.direction = 0
-
-        self.rotation_speed = 8  # test with 4
+        self.rotation_speed = 8
         self.angle = -35
 
         self.x = 1100 + random.randint(-20, 20)
         self.y = 590 + random.randint(-40, 13)
-        #self.x = 1100
-        #self.y = 590
-
-        self.rect.x = self.x
-        self.rect.y = self.y
-
-        self.radar1_rect = None
-        self.start_radar = False
+        self.rect.x = int(self.x)
+        self.rect.y = int(self.y)
 
         self.alive = True
-
-        self.moved = False
-        self.rotated = False
-
-        self.radars = []
-
-        self.prev_goal = goals_rects[10]
-        self.next_goal = goals_rects[0]
+        self.radars: list[list[int]] = []
+        self.start_radar = False
+        self.prev_goal = GOALS[-1]
+        self.next_goal = GOALS[0]
         self.score = 0
 
-    def rotate(self):
+    def rotate(self) -> None:
         if self.direction == 1:
             self.angle += self.rotation_speed
-        if self.direction == -1:
+        elif self.direction == -1:
             self.angle -= self.rotation_speed
 
-    def move_forward(self):
+    def move_forward(self) -> None:
         self.speed = min(self.speed + self.acceleration, self.max_speed)
-        self.move()
-
-    def reduce_speed(self):
-        self.speed = max(self.speed - self.acceleration / 1.2, 0)
-        self.move()
-
-    def move_backward(self):
-        self.speed = max(self.speed - self.acceleration, 0)
-        self.move()
-
-    def move(self):
         radians = math.radians(self.angle)
-        vertical = math.cos(radians) * self.speed
-        horizontal = math.sin(radians) * self.speed
+        self.y -= math.cos(radians) * self.speed
+        self.x -= math.sin(radians) * self.speed
 
-        self.y -= vertical
-        self.x -= horizontal
-        self.update()
+    def scan_radar(self, relative_angle: int) -> None:
+        if not self.start_radar:
+            return
 
-    def bounce(self):
-        self.speed = -self.speed / 2
-        self.move()
+        length = 0
+        x, y = self.rect.center
+        radar_angle = self.angle + 90 + relative_angle
 
-    def radar(self, r_angle):
+        while is_on_road((x, y)) and length < RADAR_RANGE:
+            length += 1
+            x = int(self.rect.centerx + math.cos(math.radians(radar_angle)) * length)
+            y = int(self.rect.centery - math.sin(math.radians(radar_angle)) * length)
 
-        if self.start_radar:
+        if draw_radars:
+            pygame.draw.line(screen, (255, 0, 0), self.rect.center, (x, y), 1)
+            pygame.draw.circle(screen, (255, 255, 0), (x, y), 2)
 
-            length = 0  # longitud de la línea en píxeles
-            radians = math.radians(self.angle + 90 + r_angle)
-            x = int(self.rect.center[0])
-            y = int(self.rect.center[1])
+        distance = int(math.hypot(self.rect.centerx - x, self.rect.centery - y))
+        self.radars.append([relative_angle, distance])
 
-            if not (0 <= self.rect.center[0] < SCREEN_WIDTH and 0 <= self.rect.center[1] < SCREEN_HEIGHT):
-                return
-            while not screen.get_at((x, y)) == pygame.Color(255, 255, 255,
-                                                            255) and length < 250 and 0 <= x < SCREEN_WIDTH - 10 and 0 <= y < SCREEN_HEIGHT - 10:
-                length += 1
-                x = int(self.rect.center[0] + math.cos(math.radians(self.angle + 90 + r_angle)) * length)
-                y = int(self.rect.center[1] - math.sin(math.radians(self.angle + 90 + r_angle)) * length)
+    def sensor_data(self) -> list[int]:
+        values = {45: 0, 0: 0, -45: 0}
+        for angle, distance in self.radars:
+            values[angle] = distance
+        return [values[45], values[0], values[-45]]
 
-            ##Draw Radar##
-            pygame.draw.line(screen, (255, 0, 0, 255), self.rect.center, (x, y), 1)
-            pygame.draw.circle(screen, (255, 255, 0, 255), (x, y), 2)
+    def update_goal_progress(self) -> None:
+        if not self.rect.colliderect(self.next_goal):
+            return
 
-            dist = int(math.sqrt(math.pow(self.rect.center[0] - x, 2) + math.pow(self.rect.center[1] - y, 2)))
+        current_index = GOALS.index(self.next_goal)
+        self.prev_goal = self.next_goal
+        self.next_goal = GOALS[(current_index + 1) % len(GOALS)]
+        self.score += 1
 
-            self.radars.append([r_angle, dist])
+    def sample_collision_points(self) -> list[tuple[int, int]]:
+        radius = max(4, min(self.rect.width, self.rect.height) // 3)
+        center = self.rect.center
+        return [
+            center,
+            (center[0] + radius, center[1]),
+            (center[0] - radius, center[1]),
+            (center[0], center[1] + radius),
+            (center[0], center[1] - radius),
+        ]
 
-    def data(self):
-        iinput = [0, 0, 0]
-        for i, radar in enumerate(self.radars):
-            if radar[0] == 45:
-                iinput[0] = int(radar[1])
-            elif radar[0] == 0:
-                iinput[1] = int(radar[1])
-            elif radar[0] == -45:
-                iinput[2] = int(radar[1])
-        return iinput
-
-    def goals(self):
-        if self.rect.colliderect(self.next_goal):
-            index_prev = int(goals_rects.index(self.prev_goal))
-            print(f'Collision, Index is: {index_prev}')
-            print(f'Prev goal is: {self.prev_goal}')
-            print(f'Next goal is = {self.next_goal}')
-
-            if self.prev_goal == goals_rects[10]:
-                self.prev_goal = goals_rects[0]
-                self.next_goal = goals_rects[1]
-                print("+ Fit")
-                self.score += 1
-
-            elif self.next_goal == goals_rects[9]:
-                self.prev_goal = goals_rects[9]
-                self.next_goal = goals_rects[10]
-                print("+ Fit")
-                self.score += 1
-
-            elif self.next_goal == goals_rects[10]:
-                self.prev_goal = goals_rects[10]
-                self.next_goal = goals_rects[0]
-                #print("+ Fit")
-                self.score += 1
-
-            elif self.next_goal == goals_rects[index_prev + 1]:
-                self.prev_goal = self.next_goal
-                self.next_goal = goals_rects[index_prev + 2]
-                print("+ Fit")
-                self.score += 1
-
-    def update(self):
-
+    def update(self) -> None:
         self.radars.clear()
+        self.rotate()
+        self.move_forward()
 
-        if not self.moved:
-            self.moved = True
-            self.move_forward()
+        rotated = pygame.transform.rotate(self.alpha_image, self.angle)
+        self.rect = rotated.get_rect(center=self.image.get_rect(center=(self.x, self.y)).center)
+        self.image = rotated
 
-        if not self.rotated:
-            self.rotated = True
-            self.rotate()
-
-        rotated_image = pygame.transform.rotate(self.alpha_image, self.angle)
-        new_rect = rotated_image.get_rect(center=self.image.get_rect(center=(self.x, self.y)).center)
-        self.image = rotated_image
-        self.rect = new_rect
-        self.radar(45)
-        self.radar(0)
-        self.radar(-45)
-        #print(self.radars)
-        self.goals()
-        # self.data()
-        self.moved = False
-        self.rotated = False
+        self.scan_radar(45)
+        self.scan_radar(0)
+        self.scan_radar(-45)
+        self.update_goal_progress()
+        self.alive = all(is_on_road(point) for point in self.sample_collision_points())
 
 
-def remove(index):
+def remove_car(index: int) -> None:
     cars.pop(index)
     ge.pop(index)
     nets.pop(index)
 
 
-class Obstacle(pygame.sprite.Sprite):
-    def __init__(self, start_pos):
-        super().__init__()
-        self.image = scale_image(pygame.image.load('assets/fondo1.png'), 1)
-        self.rect = self.image.get_rect()
+def init_pygame(headless: bool) -> None:
+    global screen, clock, track, road_mask, car_image
+
+    if headless:
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+
+    pygame.init()
+    pygame.display.set_caption("neatRace")
+    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+    clock = pygame.time.Clock()
+
+    track = load_image("Track1.png")
+    mask_source = load_image("fondo1.png")
+    road_mask = pygame.mask.from_threshold(mask_source, ROAD_COLOR, ROAD_THRESHOLD)
+    car_image = scale_image(load_image("Car_3_01.png"), 0.04)
 
 
-def plotting(data1, data2):
-    # TEMP, Only data1
-
-    data1 = data1.drop(df.index[-1])
-    data2 = data2.drop(df.index[-1])
-
-    print(data1)
-    print(data2)
-
-    xx = data1['generation']
-    yy = data1['max_fitness']
-
-    xz = data2['generation']
-    z1 = data2['car1']
-    z2 = data2['car2']
-    z3 = data2['car3']
-    z4 = data2['car4']
-    z5 = data2['car5']
-
-    plt.plot(xx, yy, color='#fbdba3')
-
-    plt.xticks(range(df.iloc[0]['generation'], df.iloc[-1]['generation'] + 1))
-
-    plt.xlabel('Generation')
-    plt.ylabel('Max Fitness')
-    # plt.legend()
-    plt.show()
-
-
-box = Obstacle((0, 0))
-obstacle_group = pygame.sprite.GroupSingle(box)
-
-# Load Track
-track = pygame.image.load('assets/Track1.png')
-track_rect = track.get_rect()
-
-# PANDAS // TEMP
-df = pd.DataFrame(columns=["generation", "total_score", "max_fitness"])
-df2 = pd.DataFrame(columns=["generation", "car1", "car2", "car3", "car4", "car5"])
-
-
-### Main Loop ###
-def eval_genomes(genomes, config):
+def eval_genomes(genomes, config) -> None:
     global cars, ge, nets
-    global df
-    global df2
 
     cars = []
     ge = []
     nets = []
-
-    print(df)
-    print(df2)
     current_generation = pop.generation
-    print(current_generation)
-    if pop.best_genome is not None and pop.best_genome.fitness is not None:
-        print("El fitness del ganador es:", pop.best_genome.fitness)
-        df.iloc[-1, df.columns.get_loc('max_fitness')] = pop.best_genome.fitness
 
-    new_row = pd.DataFrame({'generation': [current_generation], 'total_score': [0], 'max_fitness': [0]})
-    df = pd.concat([df, new_row], ignore_index=True)
-
-    print("PRINTING DF2")
-    new_row_2 = pd.DataFrame(
-        {'generation': [current_generation], 'car1': [0], 'car2': [0], 'car3': [0], 'car4': [0], 'car5': [0]})
-    df2 = pd.concat([df2, new_row_2], ignore_index=True)
-
-    print(df2)
-
-    # End with df shape
-    if df.shape[0] >= 46:
-        print("Done")
-        plotting(df, df2)
-        exit()
-
-    for genome_id, genome in genomes:
-        cars.append(pygame.sprite.GroupSingle(Car()))
+    for _, genome in genomes:
+        genome.fitness = 0.0
         ge.append(genome)
-        net = neat.nn.FeedForwardNetwork.create(genome, config)
-        nets.append(net)
-        genome.fitness = 0
+        nets.append(neat.nn.FeedForwardNetwork.create(genome, config))
+        car = pygame.sprite.GroupSingle(Car())
+        car.sprite.start_radar = True
+        cars.append(car)
 
-    for car in cars:
-        car.update()  # fix jump issue
+    max_fitness = 0.0
+    max_score = 0
 
-    # Data
-    total_score = 0
-    limit = 0
-    run = True
-    while run:
+    for frame in range(1, frame_limit + 1):
         clock.tick(60)
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
-                exit()
+                raise SystemExit
 
-        limit += 1
+        if not cars:
+            break
 
         screen.blit(track, (0, 0))
-        # Break generation after limit (in frames)
-        if limit >= 800:  # Time limit
-            for car in cars:
-                total_score += car.sprite.score
-                df.loc[df['generation'] == current_generation, 'total_score'] += total_score
-                for genome_id, genome in genomes:
-                    print(f"Genome {genome_id} fitness: {genome.fitness}")
-                i = 0
-                for genome_id, genome in genomes:
-                    df2.iloc[current_generation, i + 1] = genome.fitness
-                    i += 1
-            break
-        # Break generation if no cars left
-        if len(cars) == 0:
-            i = 0
-            for genome_id, genome in genomes:
-                df2.iloc[current_generation, i + 1] = genome.fitness
-                i += 1
-            break
-
-        # Add fitness to each genome as self.score
-        for i, car in enumerate(cars):
-            ge[i].fitness = car.sprite.score
-            # if car is dead add score to pandas and remove
-            if not car.sprite.alive:
-                car_score = car.sprite.score
-                df.loc[df['generation'] == current_generation, 'total_score'] += car_score
-                remove(i)
 
         for i, car in enumerate(cars):
-            output = nets[i].activate(car.sprite.data())
+            output = nets[i].activate(car.sprite.sensor_data())
             if output[0] > 0.6:
                 car.sprite.direction = 1
-            if output[1] > 0.6:
+            elif output[1] > 0.6:
                 car.sprite.direction = -1
-            if output[0] <= 0.6 and output[1] <= 0.6:
+            else:
                 car.sprite.direction = 0
 
-        obstacle_group.draw(screen)
-
-
-        # DRAW
-        for car in cars:
+            car.sprite.update()
             car.draw(screen)
-            car.update()
+            ge[i].fitness = car.sprite.score * 100 + frame * 0.01
+            max_fitness = max(max_fitness, ge[i].fitness)
+            max_score = max(max_score, car.sprite.score)
 
-        pygame.display.update()
+        pygame.display.flip()
 
-        # Collide
-        for i, car in enumerate(cars):
-            # Check collide
-            if pygame.sprite.spritecollide(car.sprite, obstacle_group, False, pygame.sprite.collide_mask):
-                print(f"Car {i} has collided with the obstacle!")
-                car.sprite.alive = False
-        # Radars
-        for car in cars:
-            car.sprite.start_radar = True
+        for i in reversed(range(len(cars))):
+            if not cars[i].sprite.alive:
+                remove_car(i)
+
+    history.append(
+        {
+            "generation": float(current_generation),
+            "max_fitness": float(max_fitness),
+            "max_score": float(max_score),
+            "survivors": float(len(cars)),
+        }
+    )
+
+    print(
+        f"Generation {current_generation}: "
+        f"max_fitness={max_fitness:.2f}, max_score={max_score}, survivors={len(cars)}"
+    )
 
 
-# NEAT
-def run(config_path):
+def plot_history(output_path: Path | None = None) -> None:
+    if not history:
+        return
+
+    import matplotlib.pyplot as plt
+
+    generations = [row["generation"] for row in history]
+    fitness = [row["max_fitness"] for row in history]
+
+    plt.plot(generations, fitness, color="#d38d2c")
+    plt.xlabel("Generation")
+    plt.ylabel("Max fitness")
+    plt.title("neatRace training progress")
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path)
+        print(f"Saved plot to {output_path}")
+    else:
+        plt.show()
+
+
+def run(config_path: Path, generations: int, should_plot: bool, plot_file: Path | None) -> neat.DefaultGenome:
     global pop
+
     config = neat.config.Config(
         neat.DefaultGenome,
         neat.DefaultReproduction,
         neat.DefaultSpeciesSet,
         neat.DefaultStagnation,
-        config_path
+        str(config_path),
     )
 
     pop = neat.Population(config)
     pop.add_reporter(neat.StdOutReporter(True))
-    stats = neat.StatisticsReporter()
-    pop.add_reporter(stats)
+    pop.add_reporter(neat.StatisticsReporter())
 
-    pop.run(eval_genomes, 50)
+    winner = pop.run(eval_genomes, generations)
+    print(f"Best genome fitness: {winner.fitness:.2f}")
+
+    if should_plot:
+        plot_history(plot_file)
+
+    return winner
 
 
-if __name__ == '__main__':
-    local_dir = os.path.dirname(__file__)
-    config_path = os.path.join(local_dir, 'config.txt')
-    run(config_path)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train a NEAT agent to drive around the neatRace track.")
+    parser.add_argument("--config", type=Path, default=BASE_DIR / "config.txt", help="Path to a neat-python config file.")
+    parser.add_argument("--generations", type=int, default=50, help="Number of NEAT generations to train.")
+    parser.add_argument("--frame-limit", type=int, default=800, help="Maximum frames per generation.")
+    parser.add_argument("--headless", action="store_true", help="Run without opening a visible pygame window.")
+    parser.add_argument("--no-radars", action="store_true", help="Hide radar debug lines.")
+    parser.add_argument("--seed", type=int, default=None, help="Optional random seed for reproducible starts.")
+    parser.add_argument("--plot", action="store_true", help="Plot max fitness after training.")
+    parser.add_argument("--plot-file", type=Path, default=None, help="Save the plot to a file instead of opening a window.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    global frame_limit, draw_radars
+
+    args = parse_args()
+    if args.generations < 1:
+        raise ValueError("--generations must be at least 1")
+    if args.frame_limit < 1:
+        raise ValueError("--frame-limit must be at least 1")
+
+    frame_limit = args.frame_limit
+    draw_radars = not args.no_radars
+
+    if args.seed is not None:
+        random.seed(args.seed)
+
+    init_pygame(args.headless)
+    try:
+        run(args.config, args.generations, args.plot, args.plot_file)
+    finally:
+        pygame.quit()
+
+
+if __name__ == "__main__":
+    main()
